@@ -1,0 +1,41 @@
+.custom-quill {
+  border-radius: 10px;
+}
+
+/* Default container styles */
+.custom-quill .ql-container {
+  border: none !important;
+  box-shadow: none !important;
+  background-color: transparent !important;
+  border-radius: 10px;
+  transition: border 0.2s ease;
+}
+
+/* Show red border when editor is focused */
+.custom-quill:focus-within .ql-container {
+  border: 3px solid rgba(184, 195, 213, 0.5) !important;
+}
+
+.custom-quill .ql-editor {
+  min-height: 10rem;
+  width: 100%;
+  background-color: transparent;
+  color: white;
+  font-size: 1rem;
+  letter-spacing: 0.03em;
+  resize: none;
+  outline: none;
+}
+
+.custom-quill .ql-editor::before {
+  color: #9ca3af !important;
+  opacity: 1 !important;
+  font-size: 0.8rem !important;
+  font-style: normal !important;
+  text-align: center !important;
+}
+
+.custom-quill-option .ql-editor {
+  min-height: 7rem !important;
+  font-size: 0.9rem;
+}
