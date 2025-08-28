@@ -56,6 +56,11 @@ npm install
 yarn install
 ```
 
+⚙️ Environment Setup
+
+1. Create a .env file in the project root.
+2. Add required environment variables
+
 3. **Run the development server**
    npm start
 
