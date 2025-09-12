@@ -5,7 +5,9 @@ import App from "./App.jsx";
 import axios from "axios";
 import { ThemeProvider } from "./components/ThemeProvider";
 
-axios.defaults.baseURL = "http://127.0.0.1:8000";
+// axios.defaults.baseURL = "http://host-agent:8000";
+// axios.defaults.baseURL = "http://127.0.0.1:8000";
+axios.defaults.baseURL = "http://localhost:8000";
 
 createRoot(document.getElementById("root")).render(
   <ThemeProvider

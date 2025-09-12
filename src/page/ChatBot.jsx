@@ -51,6 +51,7 @@ import { uploadPicture } from "@/service/ImageService";
 import { ChatSearchModal } from "@/components/ChatSearchModal";
 import { SettingsModal } from "@/components/ChatSettingModal";
 import { SpeakerWaveIcon } from "@heroicons/react/24/outline";
+import VoiceChatInterface from "./VoiceChatInterface";
 
 export default function ChatBot() {
   const { user, logout } = useAuth();
@@ -65,7 +66,7 @@ export default function ChatBot() {
   const currentMessageIdRef = useRef(null);
   const [imageUrl, setImageUrl] = useState(null);
   const [virusFile, setVirusFile] = useState(null);
-  const [, setVirusFileUrl] = useState(null);
+  const [virusFileUrl, setVirusFileUrl] = useState(null);
   const [reasoning, setReasoning] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const { chatId } = useParams();
@@ -75,7 +76,21 @@ export default function ChatBot() {
   const [speakIds, setSpeakIds] = useState({});
   const wsRef = useRef(null);
   const navigate = useNavigate();
-  console.log(user);
+  const [workingStep, setWorkingStep] = useState("");
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 768);
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  useEffect(() => {
+    if (isMobile) {
+      setSidebarOpen(false);
+    }
+  }, [isMobile]);
 
   const handleSearch = () => {
     setIsModalOpen(true);
@@ -87,23 +102,28 @@ export default function ChatBot() {
     navigate("/login");
   };
 
-  const handleVirusFileUpload = async () => {
-    if (!virusFile) return;
-    if (!input.trim() || isLoading) return;
-
-    const formData = new FormData();
-    formData.append("file", virusFile);
-
+  const handleVirusFileUpload = async (virusFile) => {
     try {
-      const res = await axios.post("/upload", formData, {
-        headers: {
-          "Content-Type": "multipart/form-data",
-        },
-      });
-      if (res.status === 200) {
-        setVirusFileUrl(res.data.file_url);
-        return res.data.file_url;
-      }
+      // Read file as base64
+      const reader = new FileReader();
+      reader.readAsDataURL(virusFile); // produces "data:...;base64,XXX"
+      reader.onload = async () => {
+        const base64String = reader.result.split(",")[1]; // remove "data:...;base64,"
+
+        const formData = new FormData();
+        formData.append("filename", virusFile.name);
+        formData.append("content_base64", base64String);
+
+        const res = await axios.post(
+          `${import.meta.env.VITE_FILE_SERVER_URL}/upload`,
+          formData
+        );
+        console.log(res.data);
+
+        if (res.status === 200) {
+          setVirusFileUrl(res.data.download_url);
+        }
+      };
     } catch (err) {
       console.error("Upload error:", err);
     }
@@ -185,10 +205,9 @@ export default function ChatBot() {
 
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
-      console.log("WebSocket message:", msg);
-      setIsLoading(false);
 
       if (msg.type === "reasoning") {
+        setIsLoading(false);
         setMessages((prev) => {
           const lastMessage = prev[prev.length - 1];
           if (
@@ -216,6 +235,7 @@ export default function ChatBot() {
           }
         });
       } else if (msg.type === "answer") {
+        setIsLoading(false);
         setMessages((prev) => {
           const lastMessage = prev[prev.length - 1];
           if (
@@ -242,12 +262,15 @@ export default function ChatBot() {
             return [...prev, newMessage];
           }
         });
+        setWorkingStep("");
       } else if (msg.type === "title") {
         setChatHistory((prevChats) =>
           prevChats.map((chat) =>
             chat.unique_id === msg.chatId ? { ...chat, title: msg.title } : chat
           )
         );
+      } else if (msg.type === "step") {
+        setWorkingStep(msg.step);
       } else if (msg.type === "new_chat") {
         const newChat = {
           id: msg.id,
@@ -274,6 +297,7 @@ export default function ChatBot() {
         setVirusFile(null);
         setVirusFileUrl(null);
         setFiles(null);
+        setWorkingStep("");
       }
     };
 
@@ -297,13 +321,68 @@ export default function ChatBot() {
     }
   };
 
+  const chat = async (query) => {
+    if (!query.trim() || isLoading) return;
+
+    const userMessage = {
+      id: Date.now().toString(),
+      role: "user",
+      content: query,
+      timestamp: new Date(),
+      imageUrl: imageUrl,
+    };
+    setMessages((prev) => [...prev, userMessage]);
+    setInput("");
+    setIsLoading(true);
+    if (currentChatId) {
+      setChatHistory((prev) =>
+        prev.map((chat) =>
+          chat.id === currentChatId
+            ? {
+                ...chat,
+                lastMessage: query.slice(0, 50),
+                messageCount: chat.messageCount + 1,
+                timestamp: new Date(),
+              }
+            : chat
+        )
+      );
+    }
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          currentChatId: currentChatId,
+          query: query,
+          fileUrl: virusFileUrl,
+          imageUrl: imageUrl,
+          includeReasoning: reasoning,
+          token: JSON.parse(localStorage.getItem("innoreigniters_credentials"))
+            .access_token,
+        })
+      );
+      setVirusFile(null);
+      setVirusFileUrl(null);
+      setFiles(null);
+      setImageUrl(null);
+    } else {
+      console.error("WebSocket not connected");
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          role: "assistant",
+          content: "Error: Unable to connect to the server. Please try again.",
+          timestamp: new Date(),
+        },
+      ]);
+      setIsLoading(false);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
-    let virus;
-    if (virusFile) {
-      virus = await handleVirusFileUpload();
-    }
 
     const userMessage = {
       id: Date.now().toString(),
@@ -335,7 +414,7 @@ export default function ChatBot() {
         JSON.stringify({
           currentChatId: currentChatId,
           query: input,
-          fileUrl: virus,
+          fileUrl: virusFileUrl,
           imageUrl: imageUrl,
           includeReasoning: reasoning,
           token: JSON.parse(localStorage.getItem("innoreigniters_credentials"))
@@ -363,6 +442,8 @@ export default function ChatBot() {
 
   const handleNewChat = () => {
     navigate("/");
+    setMessages([]);
+    setCurrentChatId(null);
   };
 
   const handleDeleteChat = async (chatId, e) => {
@@ -398,7 +479,6 @@ export default function ChatBot() {
   const sidebarItems = [
     { icon: Search, label: "Search", shortcut: "Ctrl+K" },
     { icon: MessageSquare, label: "New Chat", active: true },
-    { icon: Mic, label: "Voice" },
   ];
 
   const currentMessages = currentChatId ? messages : messages;
@@ -436,604 +516,718 @@ export default function ChatBot() {
     }, 2000);
   };
 
-  const handleSpeak = (message, id) => {
-    if (!message) return;
-    const utterance = new SpeechSynthesisUtterance(message);
-    utterance.lang = "en-US";
-    setSpeakIds((prev) => ({ ...prev, [id]: true }));
-    utterance.onend = () => setCopiedIds((prev) => ({ ...prev, [id]: false }));
-    speechSynthesis.speak(utterance);
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef(null);
+
+  useEffect(() => {
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      alert("Your browser does not support Speech Recognition");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-US";
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setInput(transcript);
+      print(transcript);
+      // chat(transcript);
+    };
+
+    recognition.onend = () => setListening(false);
+
+    recognitionRef.current = recognition;
+  }, []);
+
+  const startListening = () => {
+    setListening(true);
+    recognitionRef.current.start();
   };
 
+  const voiceChat = () => {
+    console.log("vo");
+    startListening();
+    // chat(input);
+  };
+
+  // Store currently playing audios
+  const audioRefs = {};
+
+  const handleSpeak = async (message, id) => {
+    if (!message) return;
+
+    try {
+      setSpeakIds((prev) => ({ ...prev, [id]: true }));
+
+      // Axios POST request expecting a blob response
+      const res = await axios.post(
+        "http://localhost:8000/tts",
+        { message },
+        {
+          responseType: "blob",
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+
+      const blob = res.data;
+      const url = URL.createObjectURL(blob);
+
+      const audioElement = new Audio(url);
+      audioRefs[id] = audioElement; // Save reference
+
+      audioElement.onended = () => {
+        setSpeakIds((prev) => ({ ...prev, [id]: false }));
+        delete audioRefs[id]; // Clean up
+      };
+
+      await audioElement.play();
+    } catch (error) {
+      console.error("Error with TTS playback:", error);
+      setSpeakIds((prev) => ({ ...prev, [id]: false }));
+      delete audioRefs[id];
+    }
+  };
+
+  // Stop speaking
   const stopSpeak = (id) => {
-    speechSynthesis.cancel();
-    setSpeakIds((prev) => ({ ...prev, [id]: false }));
+    const audio = audioRefs[id];
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+      setSpeakIds((prev) => ({ ...prev, [id]: false }));
+      delete audioRefs[id];
+    }
+  };
+
+  const [isVoiceChat, setIsVoiceChat] = useState(false);
+
+  const closeVoiceChat = () => {
+    setIsVoiceChat(!isVoiceChat);
   };
 
   return (
-    <div className="flex h-screen bg-background">
-      <ChatSearchModal
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        chats={chatHistory}
-      />
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-      />
+    <>
+      {isVoiceChat ? (
+        <VoiceChatInterface onClose={closeVoiceChat} voiceChat={voiceChat} />
+      ) : (
+        <div className="flex h-screen bg-background border">
+          <ChatSearchModal
+            isOpen={isModalOpen}
+            onClose={() => setIsModalOpen(false)}
+            chats={chatHistory}
+          />
 
-      <div
-        className={`${
-          sidebarOpen ? "w-64" : "w-0"
-        } transition-all duration-300 ease-in-out overflow-hidden border-r bg-background`}
-      >
-        <div className="flex flex-col h-full">
-          <div className="flex items-center p-4">
-            <div className="flex items-center space-x-2">
-              <div className="w-16 h-16 logo-glow flex items-center justify-center">
-                <img
-                  src="/logo_light.png"
-                  alt="Logo"
-                  className="object-contain w-12 h-12 dark:hidden rounded-full "
-                />
-                <img
-                  src="/logo_dark.png"
-                  alt="Logo"
-                  className="object-contain w-16 h-16 hidden dark:block"
-                />
-              </div>
-              <span className="text-lg font-medium">InnoIgnitersAI</span>
-            </div>
-          </div>
+          <SettingsModal
+            isOpen={isSettingsOpen}
+            onClose={() => setIsSettingsOpen(false)}
+          />
 
-          <div className="px-3 space-y-1">
-            {sidebarItems.map((item) => (
+          <div>
+            {sidebarOpen && (
               <div
-                key={item.label}
-                className={`sidebar-item flex items-center justify-between px-3 py-2 text-sm cursor-pointer ${
-                  item.active ? "active" : ""
-                }`}
-                onClick={
-                  item.label === "New Chat"
-                    ? handleNewChat
-                    : item.label === "Search"
-                    ? handleSearch
-                    : undefined
-                }
-              >
-                <div className="flex items-center space-x-3">
-                  <item.icon className="w-4 h-4" />
-                  <span>{item.label}</span>
-                </div>
-                {item.shortcut && (
-                  <span className="text-xs text-muted-foreground">
-                    {item.shortcut}
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
+                className="fixed inset-0 bg-black/50 z-40 md:hidden"
+                onClick={() => setSidebarOpen(false)}
+              />
+            )}
 
-          <div className="flex-1 px-3 mt-6">
-            <div className="text-xs font-medium text-muted-foreground mb-3 px-3">
-              Today
-            </div>
-            <ScrollArea className="space-y-1 scrollbar-thin">
-              {chatHistory.map((chat) => (
-                <div
-                  key={chat.id}
-                  className={`sidebar-item w-56 flex items-center justify-between px-3 py-2 cursor-pointer group ${
-                    currentChatId === chat.unique_id
-                      ? "bg-gray-200 rounded-xl dark:bg-slate-700"
-                      : ""
-                  }`}
-                  onClick={() => handleChatSelect(chat.unique_id)}
-                >
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm w-44 truncate">{chat.title}</p>
+            <div
+              className={`${
+                sidebarOpen ? "w-72" : "w-0"
+              } transition-all duration-300 ease-in-out overflow-hidden border-r bg-background md:relative fixed left-0 top-0 h-full z-50 md:z-auto`}
+            >
+              <div className="flex flex-col h-full">
+                <div className="flex items-center p-4">
+                  <div className="flex items-center space-x-2">
+                    <div className="w-16 h-16 logo-glow flex items-center justify-center">
+                      <img
+                        src="/logo_light.png"
+                        alt="Logo"
+                        className="object-contain w-12 h-12 dark:hidden rounded-full "
+                      />
+                      <img
+                        src="/logo_dark.png"
+                        alt="Logo"
+                        className="object-contain w-16 h-16 hidden dark:block"
+                      />
+                    </div>
+                    <span className="text-lg font-medium">InnoIgnitersAI</span>
                   </div>
+                </div>
+
+                <div className="px-3 space-y-1">
+                  {sidebarItems.map((item) => (
+                    <div
+                      key={item.label}
+                      className={`sidebar-item flex items-center justify-between px-3 py-2 text-sm cursor-pointer ${
+                        item.active ? "active" : ""
+                      }`}
+                      onClick={
+                        item.label === "New Chat"
+                          ? handleNewChat
+                          : item.label === "Search"
+                          ? handleSearch
+                          : undefined
+                      }
+                    >
+                      <div className="flex items-center space-x-3">
+                        <item.icon className="w-4 h-4" />
+                        <span>{item.label}</span>
+                      </div>
+                      {item.shortcut && (
+                        <span className="text-xs text-muted-foreground">
+                          {item.shortcut}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex-1 px-3 mt-6">
+                  <div className="text-xs font-medium text-muted-foreground mb-3 px-3">
+                    Today
+                  </div>
+                  <ScrollArea className="space-y-1 scrollbar-thin">
+                    {chatHistory.map((chat) => (
+                      <div
+                        key={chat.id}
+                        className={`sidebar-item w-56 flex items-center justify-between px-3 py-2 cursor-pointer group ${
+                          currentChatId === chat.unique_id
+                            ? "bg-gray-200 rounded-xl dark:bg-slate-700"
+                            : ""
+                        }`}
+                        onClick={() => handleChatSelect(chat.unique_id)}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm w-44 truncate">{chat.title}</p>
+                        </div>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="opacity-0 group-hover:opacity-100 transition-opacity h-6 w-6 p-0"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <MoreHorizontal className="w-3 h-3" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={(e) =>
+                                handleDeleteChat(chat.unique_id, e)
+                              }
+                              className="text-red-600 focus:text-destructive"
+                            >
+                              <Trash2 className="w-4 h-4 mr-2" />
+                              Delete chat
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    ))}
+                  </ScrollArea>
+                </div>
+
+                <div className="p-3 border-t">
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="opacity-0 group-hover:opacity-100 transition-opacity h-6 w-6 p-0"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <MoreHorizontal className="w-3 h-3" />
-                      </Button>
+                      <div className="sidebar-item flex items-center space-x-3 px-3 py-2 cursor-pointer">
+                        <Avatar className="w-6 h-6">
+                          <AvatarImage src={user?.image || ""} />
+                          <AvatarFallback>
+                            <User className="w-3 h-3" />
+                          </AvatarFallback>
+                        </Avatar>
+                        <span className="text-sm truncate">
+                          {user?.email?.split("@")[0] || "User"}
+                        </span>
+                      </div>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem
-                        onClick={(e) => handleDeleteChat(chat.unique_id, e)}
-                        className="text-red-600 focus:text-destructive"
-                      >
-                        <Trash2 className="w-4 h-4 mr-2" />
-                        Delete chat
+                    <DropdownMenuContent align="end" className="w-56">
+                      {!isMobile && (
+                        <DropdownMenuItem
+                          onClick={() => setIsSettingsOpen(true)}
+                        >
+                          <Settings className="w-4 h-4 mr-2" />
+                          Settings
+                        </DropdownMenuItem>
+                      )}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={signout}>
+                        <LogOut className="w-4 h-4 mr-2" />
+                        Sign out
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
-              ))}
-            </ScrollArea>
-          </div>
-
-          <div className="p-3 border-t">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <div className="sidebar-item flex items-center space-x-3 px-3 py-2 cursor-pointer">
-                  <Avatar className="w-6 h-6">
-                    <AvatarImage src={user?.image || ""} />
-                    <AvatarFallback>
-                      <User className="w-3 h-3" />
-                    </AvatarFallback>
-                  </Avatar>
-                  <span className="text-sm truncate">
-                    {user?.email?.split("@")[0] || "User"}
-                  </span>
-                </div>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuItem onClick={() => setIsSettingsOpen(true)}>
-                  <Settings className="w-4 h-4 mr-2" />
-                  Settings
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={signout}>
-                  <LogOut className="w-4 h-4 mr-2" />
-                  Sign out
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex-1 flex flex-col">
-        <div className="flex items-center justify-between p-4 border-b">
-          <div className="flex items-center space-x-3">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="p-2"
-            >
-              <div className="w-4 h-4 flex flex-col space-y-1">
-                <div className="w-full h-0.5 bg-current"></div>
-                <div className="w-full h-0.5 bg-current"></div>
-                <div className="w-full h-0.5 bg-current"></div>
               </div>
-            </Button>
-          </div>
-          <div className="flex items-center space-x-2">
-            <div variant="ghost" size="sm">
-              <ThemeToggle />
-            </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setIsSettingsOpen(true)}
-            >
-              <Settings className="w-4 h-4" />
-            </Button>
-            {/* <Button variant="ghost" size="sm">
-              <Share className="w-4 h-4" />
-              <span className="ml-2 text-sm">Share</span>
-            </Button> */}
-          </div>
-        </div>
-
-        <ScrollArea className="flex-1 scrollbar-thin max-h-[480px]">
-          <div className="max-w-4xl mx-auto px-4">
-            {currentMessages.length === 0 && !currentChatId && (
-              <div className="flex flex-col items-center justify-center min-h-[60vh] text-center">
-                <div className="w-40 h-40 logo-glow">
-                  <img
-                    src="/logo_dark.png"
-                    alt="Logo"
-                    className="object-contain w-40 h-40 hidden dark:block"
-                  />
-                  <img
-                    src="/logo_light.png"
-                    alt="Logo"
-                    className="object-contain w-40 h-40 block dark:hidden"
-                  />
-                </div>
-                <h1 className="text-4xl font-light mb-4">
-                  Welcome back, {user?.email?.split("@")[0] || "there"}!
-                </h1>
-                <p className="text-muted-foreground">
-                  How can InnoIgnitersAI help you today?
-                </p>
-              </div>
-            )}
-            <div className="space-y-6 py-6">
-              {currentMessages.map((message, index) => (
-                <div key={index} className="flex space-x-4 message-enter">
-                  <Avatar className="w-8 h-8 flex-shrink-0">
-                    <AvatarFallback
-                      className={
-                        message.role === "user"
-                          ? "bg-blue-500"
-                          : "bg-foreground"
-                      }
-                    >
-                      {message.role === "user" ? (
-                        <User className="w-4 h-4 text-white" />
-                      ) : (
-                        <Bot className="w-4 h-4 text-background" />
-                      )}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="flex-1 space-y-5">
-                    <div className="overflow-x-auto">
-                      {message.reasoning && (
-                        <div className="mb-3 p-4 bg-gray-100 dark:bg-gray-800 rounded-lg max-w-3xl">
-                          <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
-                            Reasoning:
-                          </h4>
-                          <ReactMarkdown
-                            remarkPlugins={[remarkMath, remarkGfm]}
-                            rehypePlugins={[rehypeKatex]}
-                            components={{
-                              p: ({ ...props }) => (
-                                <p
-                                  className="mb-2 leading-relaxed text-gray-600 dark:text-gray-400"
-                                  {...props}
-                                />
-                              ),
-                            }}
-                          >
-                            {typeof message.reasoning === "string"
-                              ? message.reasoning
-                              : ""}
-                          </ReactMarkdown>
-                        </div>
-                      )}
-
-                      <div className="max-w-3xl">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkMath, remarkGfm]}
-                          rehypePlugins={[rehypeKatex]}
-                          components={{
-                            h1: ({ ...props }) => (
-                              <h5
-                                className="mt-4 my-2 text-2xl font-semibold text-slate-800 dark:text-gray-200 mb-2"
-                                {...props}
-                              />
-                            ),
-                            h2: ({ ...props }) => (
-                              <h5
-                                className="mt-4 my-2 text-xl font-semibold text-slate-800 dark:text-gray-200 mb-2"
-                                {...props}
-                              />
-                            ),
-                            h3: ({ ...props }) => (
-                              <h5
-                                className="mt-4 my-2 text-lg font-semibold text-slate-800 dark:text-gray-200 mb-2"
-                                {...props}
-                              />
-                            ),
-                            strong: ({ ...props }) => (
-                              <strong className="font-semibold" {...props} />
-                            ),
-                            hr: ({ ...props }) => (
-                              <div className="relative my-8">
-                                <hr
-                                  className="border-gray-300 dark:border-gray-600"
-                                  {...props}
-                                />
-                              </div>
-                            ),
-                            code({ inline, className, children, ...props }) {
-                              const match = /language-(\w+)/.exec(
-                                className || ""
-                              );
-                              return !inline && match ? (
-                                <div className="relative my-4 rounded-lg overflow-hidden border border-gray-300 dark:border-gray-600">
-                                  <div className="flex justify-between items-center bg-gray-100 dark:bg-gray-800 dark:text-gray-100 text-black text-sm px-3 py-1">
-                                    <span>{match[1]}</span>
-                                    <button
-                                      className="text-xs dark:text-white dark:bg-gray-700 bg-transparent text-black hover:text-white px-2 py-1 rounded dark:hover:bg-gray-600 hover:bg-gray-900"
-                                      onClick={() => {
-                                        navigator.clipboard.writeText(
-                                          String(children).trim()
-                                        );
-                                      }}
-                                    >
-                                      Copy
-                                    </button>
-                                  </div>
-                                  <SyntaxHighlighter
-                                    style={oneDark}
-                                    language={match[1]}
-                                    PreTag="div"
-                                    {...props}
-                                  >
-                                    {String(children).replace(/\n$/, "")}
-                                  </SyntaxHighlighter>
-                                </div>
-                              ) : (
-                                <code
-                                  className="bg-green-100 italic font-semibold dark:bg-gray-700 px-1 py-0.5 rounded text-sm"
-                                  {...props}
-                                >
-                                  {children}
-                                </code>
-                              );
-                            },
-                            table: ({ ...props }) => (
-                              <table
-                                className="min-w-full border border-gray-300 dark:border-gray-600 rounded-md overflow-hidden"
-                                {...props}
-                              />
-                            ),
-                            th: ({ ...props }) => (
-                              <th
-                                className="bg-white dark:bg-gray-800 text-left px-4 py-2 border-b border-gray-300 dark:border-gray-600 font-medium"
-                                {...props}
-                              />
-                            ),
-                            td: ({ ...props }) => (
-                              <td
-                                className="px-4 py-2 border-b border-gray-300 dark:border-gray-700"
-                                {...props}
-                              />
-                            ),
-                            tr: ({ ...props }) => (
-                              <tr
-                                className="odd:bg-white even:bg-gray-50 dark:odd:bg-gray-700 dark:even:bg-gray-700"
-                                {...props}
-                              />
-                            ),
-                            p: ({ ...props }) => (
-                              <p
-                                className="mb-2 leading-loose text-gray-800 dark:text-gray-200"
-                                {...props}
-                              />
-                            ),
-                            li: ({ ...props }) => (
-                              <li
-                                className="mb-1 leading-loose text-gray-800 dark:text-gray-200 list-disc ml-6"
-                                {...props}
-                              />
-                            ),
-                          }}
-                        >
-                          {typeof message.content === "string"
-                            ? message.content.replace(
-                                /\[([^\]]+)\]/g,
-                                (_, math) => `$$${math}$$`
-                              )
-                            : ""}
-                        </ReactMarkdown>
-                        {copiedIds[message.id] ? (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className={"cursor-pointer"}
-                          >
-                            <Check className="w-4 h-4 text-gray-600" />
-                          </Button>
-                        ) : (
-                          <Button
-                            onClick={() =>
-                              handleCopy(message.content, message.id)
-                            }
-                            variant="ghost"
-                            size="sm"
-                            className={"cursor-pointer"}
-                          >
-                            <Copy className="w-4 h-4 text-gray-600" />
-                          </Button>
-                        )}
-
-                        {speakIds[message.id] ? (
-                          <Button
-                            variant={"ghost"}
-                            onClick={() => stopSpeak(message.id)}
-                            className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg"
-                          >
-                            <CirclePause className={`w-5 h-5 `} />
-                          </Button>
-                        ) : (
-                          <Button
-                            variant={"ghost"}
-                            onClick={() =>
-                              handleSpeak(message.content, message.id)
-                            }
-                            className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg"
-                          >
-                            <SpeakerWaveIcon className={`w-5 h-5`} />
-                          </Button>
-                        )}
-                      </div>
-                      {message.imageUrl && (
-                        <div className="h-64 w-64">
-                          <img
-                            src={message.imageUrl}
-                            alt={"User's image"}
-                            className="object-cover w-full h-full"
-                          />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-              {isLoading && (
-                <div className="flex space-x-4">
-                  <Avatar className="w-8 h-8 flex-shrink-0">
-                    <AvatarFallback className="bg-foreground">
-                      <Bot className="w-4 h-4 text-background" />
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="flex-1 space-y-2">
-                    <div className="flex space-x-1">
-                      <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"></div>
-                      <div
-                        className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
-                        style={{ animationDelay: "0.1s" }}
-                      ></div>
-                      <div
-                        className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"
-                        style={{ animationDelay: "0.2s" }}
-                      ></div>
-                    </div>
-                  </div>
-                </div>
-              )}
-              <div ref={messagesEndRef} />
             </div>
           </div>
-        </ScrollArea>
 
-        <div className="p-4 py-0">
-          <div className="max-w-3xl mx-auto">
-            <div className="flex gap-2 px-2 mb-2 h-15">
-              {virusFile && (
-                <div className="relative w-16 h-16 rounded-lg overflow-hidden border flex items-center justify-center">
-                  {getFileIcon(virusFile)}
-                  <button
-                    type="button"
-                    onClick={() => setVirusFile(null)}
-                    className="absolute top-1 right-1 bg-black/50 rounded-full p-0.5 hover:bg-black"
-                  >
-                    <X className="w-3 h-3 text-white" />
-                  </button>
-                </div>
-              )}
-
-              {files && (
-                <div className="relative w-16 h-16 rounded-lg overflow-hidden border">
-                  <img
-                    src={URL.createObjectURL(files)}
-                    alt={files.name}
-                    className={`object-cover w-full h-full transition-all duration-500 
-        ${uploadProgress < 100 ? "blur-sm opacity-50" : "blur-0 opacity-100"}`}
-                  />
-
-                  {uploadProgress < 100 && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/30 text-white text-xs">
-                      {uploadProgress}%
-                    </div>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={() => setFiles(null)}
-                    className="absolute top-1 right-1 bg-black/50 rounded-full p-0.5 hover:bg-black"
-                  >
-                    <X className="w-3 h-3 text-white" />
-                  </button>
-                </div>
-              )}
-            </div>
-
-            <form
-              onSubmit={handleSubmit}
-              className="flex items-center px-4 py-3 space-x-2 border rounded-xl bg-background"
-            >
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                // onChange={(e) => setFiles(e.target.files[0])}
-                onChange={imageFileUpload}
-                className="hidden"
-                id="file-upload"
-              />
-
-              <input
-                type="file"
-                accept=""
-                multiple
-                onChange={(e) => setVirusFile(e.target.files[0])}
-                className="hidden"
-                id="virus-upload"
-              />
-
-              <DropdownMenu>
-                <DropdownMenuTrigger
-                  asChild
-                  className="rounded-full w-4 h-4 p-0"
+          <div className="flex-1 flex flex-col">
+            <div className="flex items-center justify-between p-4 border-b">
+              <div className="flex items-center space-x-3">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSidebarOpen(!sidebarOpen)}
+                  className="p-2"
                 >
+                  <div className="w-4 h-4 flex flex-col space-y-1">
+                    <div className="w-full h-0.5 bg-current"></div>
+                    <div className="w-full h-0.5 bg-current"></div>
+                    <div className="w-full h-0.5 bg-current"></div>
+                  </div>
+                </Button>
+              </div>
+              <div className="flex items-center space-x-2">
+                <div variant="ghost" size="sm">
+                  <ThemeToggle />
+                </div>
+                {!isMobile && (
                   <Button
                     variant="ghost"
                     size="sm"
+                    onClick={() => setIsSettingsOpen(true)}
+                  >
+                    <Settings className="w-4 h-4" />
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            <ScrollArea className="flex-1 scrollbar-thin max-h-[480px]">
+              <div className="max-w-4xl mx-auto px-4">
+                {currentMessages.length === 0 && !currentChatId && (
+                  <div className="flex flex-col items-center justify-center min-h-[60vh] text-center">
+                    <div className="w-40 h-40 logo-glow">
+                      <img
+                        src="/logo_dark.png"
+                        alt="Logo"
+                        className="object-contain w-40 h-40 hidden dark:block"
+                      />
+                      <img
+                        src="/logo_light.png"
+                        alt="Logo"
+                        className="object-contain w-40 h-40 block dark:hidden"
+                      />
+                    </div>
+                    <h1 className="text-4xl font-light mb-4">
+                      Welcome back, {user?.email?.split("@")[0] || "there"}!
+                    </h1>
+                    <p className="text-muted-foreground">
+                      How can InnoIgnitersAI help you today?
+                    </p>
+                  </div>
+                )}
+                <div className="space-y-6 py-6">
+                  {currentMessages.map((message, index) => (
+                    <div key={index} className="flex space-x-4 message-enter">
+                      <Avatar className="w-8 h-8 flex-shrink-0">
+                        <AvatarFallback
+                          className={
+                            message.role === "user"
+                              ? "bg-blue-500"
+                              : "bg-foreground"
+                          }
+                        >
+                          {message.role === "user" ? (
+                            <User className="w-4 h-4 text-white" />
+                          ) : (
+                            <Bot className="w-4 h-4 text-background" />
+                          )}
+                        </AvatarFallback>
+                      </Avatar>
+                      <div className="flex-1 space-y-5">
+                        <div className="overflow-x-auto">
+                          {message.reasoning && (
+                            <div className="mb-3 p-4 bg-gray-100 dark:bg-gray-800 rounded-lg max-w-3xl">
+                              <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                                Reasoning:
+                              </h4>
+                              <ReactMarkdown
+                                remarkPlugins={[remarkMath, remarkGfm]}
+                                rehypePlugins={[rehypeKatex]}
+                                components={{
+                                  p: ({ ...props }) => (
+                                    <p
+                                      className="mb-2 leading-relaxed text-gray-600 dark:text-gray-400"
+                                      {...props}
+                                    />
+                                  ),
+                                }}
+                              >
+                                {typeof message.reasoning === "string"
+                                  ? message.reasoning
+                                  : ""}
+                              </ReactMarkdown>
+                            </div>
+                          )}
+
+                          <div className="max-w-3xl">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkMath, remarkGfm]}
+                              rehypePlugins={[rehypeKatex]}
+                              components={{
+                                h1: ({ ...props }) => (
+                                  <h5
+                                    className="mt-4 my-2 text-2xl font-semibold text-slate-800 dark:text-gray-200 mb-2"
+                                    {...props}
+                                  />
+                                ),
+                                h2: ({ ...props }) => (
+                                  <h5
+                                    className="mt-4 my-2 text-xl font-semibold text-slate-800 dark:text-gray-200 mb-2"
+                                    {...props}
+                                  />
+                                ),
+                                h3: ({ ...props }) => (
+                                  <h5
+                                    className="mt-4 my-2 text-lg font-semibold text-slate-800 dark:text-gray-200 mb-2"
+                                    {...props}
+                                  />
+                                ),
+                                strong: ({ ...props }) => (
+                                  <strong
+                                    className="font-semibold"
+                                    {...props}
+                                  />
+                                ),
+                                hr: ({ ...props }) => (
+                                  <div className="relative my-8">
+                                    <hr
+                                      className="border-gray-300 dark:border-gray-600"
+                                      {...props}
+                                    />
+                                  </div>
+                                ),
+                                code({
+                                  inline,
+                                  className,
+                                  children,
+                                  ...props
+                                }) {
+                                  const match = /language-(\w+)/.exec(
+                                    className || ""
+                                  );
+                                  return !inline && match ? (
+                                    <div className="relative my-4 rounded-lg overflow-hidden border border-gray-300 dark:border-gray-600">
+                                      <div className="flex justify-between items-center bg-gray-100 dark:bg-gray-800 dark:text-gray-100 text-black text-sm px-3 py-1">
+                                        <span>{match[1]}</span>
+                                        <button
+                                          className="text-xs dark:text-white dark:bg-gray-700 bg-transparent text-black hover:text-white px-2 py-1 rounded dark:hover:bg-gray-600 hover:bg-gray-900"
+                                          onClick={() => {
+                                            navigator.clipboard.writeText(
+                                              String(children).trim()
+                                            );
+                                          }}
+                                        >
+                                          Copy
+                                        </button>
+                                      </div>
+                                      <SyntaxHighlighter
+                                        style={oneDark}
+                                        language={match[1]}
+                                        PreTag="div"
+                                        {...props}
+                                      >
+                                        {String(children).replace(/\n$/, "")}
+                                      </SyntaxHighlighter>
+                                    </div>
+                                  ) : (
+                                    <code
+                                      className="bg-green-100 italic font-semibold dark:bg-gray-700 px-1 py-0.5 rounded text-sm"
+                                      {...props}
+                                    >
+                                      {children}
+                                    </code>
+                                  );
+                                },
+                                table: ({ ...props }) => (
+                                  <table
+                                    className="min-w-full border border-gray-300 dark:border-gray-600 rounded-md overflow-hidden"
+                                    {...props}
+                                  />
+                                ),
+                                th: ({ ...props }) => (
+                                  <th
+                                    className="bg-white dark:bg-gray-800 text-left px-4 py-2 border-b border-gray-300 dark:border-gray-600 font-medium"
+                                    {...props}
+                                  />
+                                ),
+                                td: ({ ...props }) => (
+                                  <td
+                                    className="px-4 py-2 border-b border-gray-300 dark:border-gray-700"
+                                    {...props}
+                                  />
+                                ),
+                                tr: ({ ...props }) => (
+                                  <tr
+                                    className="odd:bg-white even:bg-gray-50 dark:odd:bg-gray-700 dark:even:bg-gray-700"
+                                    {...props}
+                                  />
+                                ),
+                                p: ({ ...props }) => (
+                                  <p
+                                    className="mb-2 leading-loose text-gray-800 dark:text-gray-200"
+                                    {...props}
+                                  />
+                                ),
+                                li: ({ ...props }) => (
+                                  <li
+                                    className="mb-1 leading-loose text-gray-800 dark:text-gray-200 list-disc ml-6"
+                                    {...props}
+                                  />
+                                ),
+                              }}
+                            >
+                              {typeof message.content === "string"
+                                ? message.content.replace(
+                                    /\[([^\]]+)\]/g,
+                                    (_, math) => `$$${math}$$`
+                                  )
+                                : ""}
+                            </ReactMarkdown>
+                            {copiedIds[message.id] ? (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className={"cursor-pointer"}
+                              >
+                                <Check className="w-4 h-4 text-gray-600" />
+                              </Button>
+                            ) : (
+                              <Button
+                                onClick={() =>
+                                  handleCopy(message.content, message.id)
+                                }
+                                variant="ghost"
+                                size="sm"
+                                className={"cursor-pointer"}
+                              >
+                                <Copy className="w-4 h-4 text-gray-600" />
+                              </Button>
+                            )}
+
+                            {speakIds[message.id] ? (
+                              <Button
+                                variant={"ghost"}
+                                onClick={() => stopSpeak(message.id)}
+                                className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg"
+                              >
+                                <CirclePause className={`w-5 h-5 `} />
+                              </Button>
+                            ) : (
+                              <Button
+                                variant={"ghost"}
+                                onClick={() =>
+                                  handleSpeak(message.content, message.id)
+                                }
+                                className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg"
+                              >
+                                <SpeakerWaveIcon className={`w-5 h-5`} />
+                              </Button>
+                            )}
+                          </div>
+                          {message.imageUrl && (
+                            <div className="h-64 w-64">
+                              <img
+                                src={message.imageUrl}
+                                alt={"User's image"}
+                                className="object-cover w-full h-full"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {isLoading && (
+                    <div className="flex space-x-4">
+                      <Avatar className="w-8 h-8 flex-shrink-0">
+                        <AvatarFallback className="bg-foreground">
+                          <Bot className="w-4 h-4 text-background" />
+                        </AvatarFallback>
+                      </Avatar>
+                      <div className="flex-1 space-y-2">
+                        <div className="flex space-x-1 items-center">
+                          <p className="text-muted-foreground text-sm">
+                            {workingStep ? workingStep : "Processing"}
+                            <span className="animate-pulse text-2xl pl-1">
+                              ...
+                            </span>
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              {/* <div ref={messagesEndRef} /> */}
+            </ScrollArea>
+
+            <div className="p-4 py-0 ">
+              <div className="max-w-3xl mx-auto">
+                <div className="flex gap-2 px-2 mb-2 h-15">
+                  {virusFile && (
+                    <div className="relative w-16 h-16 rounded-lg overflow-hidden border flex items-center justify-center">
+                      {getFileIcon(virusFile)}
+                      <button
+                        type="button"
+                        onClick={() => setVirusFile(null)}
+                        className="absolute top-1 right-1 bg-black/50 rounded-full p-0.5 hover:bg-black"
+                      >
+                        <X className="w-3 h-3 text-white" />
+                      </button>
+                    </div>
+                  )}
+
+                  {files && (
+                    <div className="relative w-16 h-16 rounded-lg overflow-hidden border">
+                      <img
+                        src={URL.createObjectURL(files)}
+                        alt={files.name}
+                        className={`object-cover w-full h-full transition-all duration-500 
+        ${uploadProgress < 100 ? "blur-sm opacity-50" : "blur-0 opacity-100"}`}
+                      />
+
+                      {uploadProgress < 100 && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/30 text-white text-xs">
+                          {uploadProgress}%
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => setFiles(null)}
+                        className="absolute top-1 right-1 bg-black/50 rounded-full p-0.5 hover:bg-black"
+                      >
+                        <X className="w-3 h-3 text-white" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <form
+                  onSubmit={handleSubmit}
+                  className="flex items-center px-4 py-3 space-x-2 border rounded-xl bg-background"
+                >
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={imageFileUpload}
+                    className="hidden"
+                    id="file-upload"
+                  />
+
+                  <input
+                    type="file"
+                    accept=""
+                    multiple
+                    onChange={(e) => {
+                      setVirusFile(e.target.files[0]);
+                      handleVirusFileUpload(e.target.files[0]);
+                    }}
+                    className="hidden"
+                    id="virus-upload"
+                  />
+
+                  <DropdownMenu>
+                    <DropdownMenuTrigger
+                      asChild
+                      className="rounded-full w-4 h-4 p-0"
+                    >
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="rounded-full w-8 h-8 p-0"
+                      >
+                        <Plus className="w-4 h-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-40">
+                      <DropdownMenuItem
+                        onClick={() =>
+                          document.getElementById("file-upload").click()
+                        }
+                      >
+                        <Image className="w-4 h-4 mr-2" />
+                        Image Upload
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+
+                      <DropdownMenuItem
+                        onClick={() =>
+                          document.getElementById("virus-upload").click()
+                        }
+                      >
+                        <FileTextIcon className="w-4 h-4 mr-2" />
+                        File Upload
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className={`rounded-4xl ${
+                      reasoning
+                        ? "bg-gray-900 text-white dark:bg-slate-800"
+                        : ""
+                    }`}
+                    onClick={() => {
+                      toggleReasoning();
+                    }}
+                  >
+                    <div
+                      className={`flex items-center space-x-1 justify-center cursor-pointer }`}
+                    >
+                      <Lightbulb className="w-4 h-4" />
+                      <span className="text-sm">Reasoning</span>
+                    </div>
+                  </Button>
+                  <Input
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="Ask me anything..."
+                    className="flex-1 border-0 bg-transparent focus-visible:ring-0 text-base placeholder:text-muted-foreground"
+                    disabled={isLoading}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      // startListening();
+                      setIsVoiceChat(!isVoiceChat);
+                    }}
+                    size="sm"
                     className="rounded-full w-8 h-8 p-0"
                   >
-                    <Plus className="w-4 h-4" />
+                    <Mic className="w-4 h-4" />
                   </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-40">
-                  <DropdownMenuItem
-                    onClick={() =>
-                      document.getElementById("file-upload").click()
-                    }
+
+                  <Button
+                    type="submit"
+                    size="sm"
+                    disabled={(!input.trim() && files) || isLoading}
+                    className="rounded-full w-8 h-8 p-0"
                   >
-                    <Image className="w-4 h-4 mr-2" />
-                    Image Upload
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-
-                  <DropdownMenuItem
-                    onClick={() =>
-                      document.getElementById("virus-upload").click()
-                    }
-                  >
-                    <FileTextIcon className="w-4 h-4 mr-2" />
-                    File Upload
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className={`rounded-4xl ${
-                  reasoning ? "bg-gray-900 text-white dark:bg-slate-800" : ""
-                }`}
-                onClick={() => {
-                  toggleReasoning();
-                }}
-              >
-                <div
-                  className={`flex items-center space-x-1 justify-center cursor-pointer }`}
-                >
-                  <Lightbulb className="w-4 h-4" />
-                  <span className="text-sm">Reasoning</span>
-                </div>
-              </Button>
-              <Input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="Ask me anything..."
-                className="flex-1 border-0 bg-transparent focus-visible:ring-0 text-base placeholder:text-muted-foreground"
-                disabled={isLoading}
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="rounded-full w-8 h-8 p-0"
-              >
-                <Mic className="w-4 h-4" />
-              </Button>
-
-              <Button
-                type="submit"
-                size="sm"
-                disabled={(!input.trim() && files) || isLoading}
-                className="rounded-full w-8 h-8 p-0"
-              >
-                <Send className="w-3 h-3" />
-              </Button>
-            </form>
+                    <Send className="w-3 h-3" />
+                  </Button>
+                </form>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
-    </div>
+      )}
+    </>
   );
 }

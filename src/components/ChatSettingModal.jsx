@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -27,9 +27,6 @@ import { ThemeToggle } from "./theme-toggle";
 const settingsItems = [
   { id: "general", label: "General", icon: Settings },
   { id: "notifications", label: "Notifications", icon: Bell },
-  //   { id: "personalization", label: "Personalization", icon: User },
-  //   { id: "connected-apps", label: "Connected apps", icon: Puzzle },
-  //   { id: "data-controls", label: "Data controls", icon: Shield },
   { id: "security", label: "Security", icon: Lock },
   { id: "account", label: "Account", icon: UserCircle },
 ];
@@ -40,7 +37,9 @@ export function SettingsModal({ isOpen, onClose }) {
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-4xl w-full h-[600px] p-0 bg-background border border-border">
+      {/* <DialogTitle/> */}
+      <DialogContent className="max-w-4xl h-[600px] p-0 bg-background border border-border">
+        {/* <DialogDescription/> */}
         <div className="flex h-full">
           {/* Sidebar */}
           <div className="w-64 bg-muted/30 border-r border-border p-4">
